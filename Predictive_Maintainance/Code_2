@@ -30,8 +30,11 @@
 /* USER CODE BEGIN PTD */
 typedef struct {
     int16_t ax, ay, az;
+} MPUData_t;
+
+typedef struct {
     uint16_t mic;
-} SensorData_t;
+} MicData_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -61,24 +64,36 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
-  .stack_size = 128 * 4,
+/* Definitions for MPU_Task */
+osThreadId_t MPU_TaskHandle;
+const osThreadAttr_t MPU_Task_attributes = {
+  .name = "MPU_Task",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityHigh1,
+};
+/* Definitions for MicTask */
+osThreadId_t MicTaskHandle;
+const osThreadAttr_t MicTask_attributes = {
+  .name = "MicTask",
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
-/* Definitions for AI_TASK */
-osThreadId_t AI_TASKHandle;
-const osThreadAttr_t AI_TASK_attributes = {
-  .name = "AI_TASK",
+/* Definitions for UARTTask */
+osThreadId_t UARTTaskHandle;
+const osThreadAttr_t UARTTask_attributes = {
+  .name = "UARTTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityLow,
+  .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for Sensor_Queue */
-osMessageQueueId_t Sensor_QueueHandle;
-const osMessageQueueAttr_t Sensor_Queue_attributes = {
-  .name = "Sensor_Queue"
+/* Definitions for MPU_Queue */
+osMessageQueueId_t MPU_QueueHandle;
+const osMessageQueueAttr_t MPU_Queue_attributes = {
+  .name = "MPU_Queue"
+};
+/* Definitions for MicQueue */
+osMessageQueueId_t MicQueueHandle;
+const osMessageQueueAttr_t MicQueue_attributes = {
+  .name = "MicQueue"
 };
 /* USER CODE BEGIN PV */
 #define MPU6050_ADDR 0x68 << 1
@@ -100,7 +115,8 @@ static void MX_USB_OTG_FS_USB_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
 void StartDefaultTask(void *argument);
-void StartTask02(void *argument);
+void StartTask04(void *argument);
+void StartTask05(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -187,19 +203,25 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* Create the queue(s) */
-  /* creation of Sensor_Queue */
-  Sensor_QueueHandle = osMessageQueueNew (50, sizeof(SensorData_t), &Sensor_Queue_attributes);
+  /* creation of MPU_Queue */
+  MPU_QueueHandle = osMessageQueueNew (50, sizeof(MPUData_t), &MPU_Queue_attributes);
+
+  /* creation of MicQueue */
+  MicQueueHandle = osMessageQueueNew (50, sizeof(MicData_t), &MicQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  /* creation of MPU_Task */
+  MPU_TaskHandle = osThreadNew(StartDefaultTask, NULL, &MPU_Task_attributes);
 
-  /* creation of AI_TASK */
-  AI_TASKHandle = osThreadNew(StartTask02, NULL, &AI_TASK_attributes);
+  /* creation of MicTask */
+  MicTaskHandle = osThreadNew(StartTask04, NULL, &MicTask_attributes);
+
+  /* creation of UARTTask */
+  UARTTaskHandle = osThreadNew(StartTask05, NULL, &UARTTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -218,8 +240,11 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-  /* USER CODE END 3 */
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
   }
+  /* USER CODE END 3 */
 }
 
 /**
@@ -931,62 +956,85 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-  SensorData_t sensor_packet;
-  uint8_t mpu_buf[6];
+	//  Read MPU6050(accelerometer)  (I2C) - 1ms timeout
+	  MPUData_t mpu_packet;
+	    uint8_t mpu_buf[6];
 
-  // Wake up MPU6050
-  uint8_t check_reg = 0;
-  HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &check_reg, 1, 100);
+	    // Wake up MPU6050 (Done once here)
+	    uint8_t check_reg = 0;
+	    HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &check_reg, 1, 100);
 
-  for(;;)
-  {
-    //  Read MPU6050(accelerometer)  (I2C) - 1ms timeout
-    if(HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 1) == HAL_OK) {
-        sensor_packet.ax = (int16_t)(mpu_buf[0] << 8 | mpu_buf[1]);
-        sensor_packet.ay = (int16_t)(mpu_buf[2] << 8 | mpu_buf[3]);
-        sensor_packet.az = (int16_t)(mpu_buf[4] << 8 | mpu_buf[5]);
-    }
+	    for(;;)
+	    {
+	      if(HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 1) == HAL_OK) {
+	          mpu_packet.ax = (int16_t)(mpu_buf[0] << 8 | mpu_buf[1]);
+	          mpu_packet.ay = (int16_t)(mpu_buf[2] << 8 | mpu_buf[3]);
+	          mpu_packet.az = (int16_t)(mpu_buf[4] << 8 | mpu_buf[5]);
+	      }
 
-    //Read Mic (ADC) - Ensure wire is on A1 (PA1/Channel 1)
-    HAL_ADC_Start(&hadc1);
-    if(HAL_ADC_PollForConversion(&hadc1, 1) == HAL_OK) {
-        sensor_packet.mic = (uint16_t)HAL_ADC_GetValue(&hadc1);
-    }
-    HAL_ADC_Stop(&hadc1);
-
-    //Put into Queue (No waiting)
-    osMessageQueuePut(Sensor_QueueHandle, &sensor_packet, 0, 0);
-
-    //Precise 1ms delay
-    osDelay(1);
-  }
+	      osMessageQueuePut(MPU_QueueHandle, &mpu_packet, 0, 0);
+	      osDelay(1);
+	    }
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_StartTask02 */
+/* USER CODE BEGIN Header_StartTask04 */
 /**
-* @brief Function implementing the AI_TASK thread.
+* @brief Function implementing the MicTask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartTask02 */
-void StartTask02(void *argument)
+/* USER CODE END Header_StartTask04 */
+void StartTask04(void *argument)
 {
-  /* USER CODE BEGIN StartTask02 */
-	SensorData_t received;
-	char csv_msg[64];
-  /* Infinite loop */
-  for(;;)
-  {
-	if(osMessageQueueGet(Sensor_QueueHandle, &received, NULL, osWaitForever) ==osOK)
-	{
-		int len=snprintf( csv_msg,sizeof(csv_msg), "%d, %d, %d, %u\r\n",
-				received.ax,received.ay,received.az,received.mic);
-		HAL_UART_Transmit(&huart1, (uint8_t*)csv_msg, len, 10);
-	}
-    osDelay(1);
-  }
-  /* USER CODE END StartTask02 */
+  /* USER CODE BEGIN StartTask04 */
+	  /*  StartMicTask */
+	  MicData_t mic_packet;
+
+	  for(;;)
+	  {
+	    HAL_ADC_Start(&hadc1);
+	    if(HAL_ADC_PollForConversion(&hadc1, 1) == HAL_OK) {
+	        mic_packet.mic = (uint16_t)HAL_ADC_GetValue(&hadc1);
+	    }
+	    HAL_ADC_Stop(&hadc1);
+	    osMessageQueuePut(MicQueueHandle, &mic_packet, 0, 0);
+	    osDelay(1);
+  /* USER CODE END StartTask04 */
+}
+}
+/* USER CODE BEGIN Header_StartTask05 */
+/**
+* @brief Function implementing the UARTTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTask05 */
+void StartTask05(void *argument)
+{
+  /* USER CODE BEGIN StartTask05 */
+	//This is for the UART part
+	  MPUData_t mpu_received;
+	  MicData_t mic_received;
+	  char csv_msg[64];
+
+	  for(;;)
+	  {
+	    // Wait for MPU data
+	    if(osMessageQueueGet(MPU_QueueHandle, &mpu_received, NULL, osWaitForever) == osOK)
+	    {
+	        // Now wait for Mic data so they match up
+	        if(osMessageQueueGet(MicQueueHandle, &mic_received, NULL, osWaitForever) == osOK)
+	        {
+	            // Format and print together
+	            int len = snprintf(csv_msg, sizeof(csv_msg), "%d,%d,%d,%u\r\n",
+	                               mpu_received.ax, mpu_received.ay, mpu_received.az, mic_received.mic);
+
+	            HAL_UART_Transmit(&huart1, (uint8_t*)csv_msg, len, 5);
+	        }
+	    }
+  /* USER CODE END StartTask05 */
+}
 }
 
 /**

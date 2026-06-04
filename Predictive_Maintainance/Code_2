@@ -57,14 +57,14 @@ DMA_HandleTypeDef hdma_usart1_tx;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for UARTTask */
 osThreadId_t UARTTaskHandle;
 const osThreadAttr_t UARTTask_attributes = {
   .name = "UARTTask",
-  .stack_size = 256 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for SensorQueue */
@@ -74,12 +74,10 @@ const osMessageQueueAttr_t SensorQueue_attributes = {
 };
 /* USER CODE BEGIN PV */
 #define MPU6050_ADDR (0x68 << 1)
-
+volatile uint32_t adc_buffer[1];
 #define ADC_DONE_FLAG   (1U << 0)
 #define UART_DONE_FLAG  (1U << 1)
-
 volatile uint16_t adcValue = 0;
-
 uint32_t droppedSamples = 0;
 /* USER CODE END PV */
 
@@ -138,18 +136,12 @@ int main(void)
   MX_USART1_UART_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-  uint8_t data;
-
-  data = 0x00;
-
-  HAL_I2C_Mem_Write(
-      &hi2c1,
-      (0x68 << 1),
-      0x6B,
-      1,
-      &data,
-      1,
-      100);
+  	uint8_t data = 0x00;
+    HAL_I2C_Mem_Write(&hi2c1, (0x68 << 1), 0x6B, 1, &data, 1, 100);
+    char boot_msg[] = "\r\n--- SYSTEM BOOTING ---\r\n";
+    HAL_UART_Transmit(&huart1, (uint8_t*)boot_msg, strlen(boot_msg), 1000);
+    HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
+    // ------------------------------
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -283,7 +275,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.NbrOfConversion = 1;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
@@ -455,9 +447,8 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     if(hadc->Instance == ADC1)
     {
-        osThreadFlagsSet(
-                defaultTaskHandle,
-                ADC_DONE_FLAG);
+        // This keeps the adcValue global variable updated if you need it elsewhere
+        adcValue = (uint16_t)adc_buffer[0];
     }
 }
 
@@ -465,9 +456,8 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if(huart->Instance == USART1)
     {
-        osThreadFlagsSet(
-                UARTTaskHandle,
-                UART_DONE_FLAG);
+        // Signal the UART Task that the buffer is free to be used again
+        osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
     }
 }
 /* USER CODE END 4 */
@@ -482,52 +472,56 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-	// 1. Initialize variables (Setting to {0} prevents the -23131 garbage)
-	  SensorData_t sensor_packet = {0};
+	SensorData_t sensor_packet = {0};
 	  uint8_t mpu_buf[6] = {0};
-	  uint8_t wake = 0; // Fix: Added the missing declaration
+	  uint8_t wake = 0x00;
 
-	  // 2. Wake up MPU6050
-	  HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &wake, 1, 100);
+	  // 1. Wait for peripherals to stabilize
+	  osDelay(100);
 
-	  // 3. Warm-up: Give hardware time to settle
-	  osDelay(500);
-
-	  // 4. Dummy reads to flush out the "startup" noise from the sensor
-	  for(int i = 0; i < 10; i++) {
-	      HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 10);
-	      osDelay(10);
+	  // 2. CHECK SENSOR READY
+	  if (HAL_I2C_IsDeviceReady(&hi2c1, MPU6050_ADDR, 5, 100) != HAL_OK) {
+	      char err_msg[] = "I2C ERROR: MPU6050 NOT FOUND!\r\n";
+	      HAL_UART_Transmit(&huart1, (uint8_t*)err_msg, strlen(err_msg), 1000);
+	      osDelay(2000);
 	  }
 
-	  // 5. Clear the queue one last time so we start with fresh data
-	  osMessageQueueReset(SensorQueueHandle);
+	  // 3. WAKE UP MPU6050
+	  HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &wake, 1, 100);
+
+	  // 4. START ADC DMA (And instantly silence the interrupt storm!)
+	  HAL_ADC_Stop_DMA(&hadc1);
+	  __HAL_ADC_CLEAR_FLAG(&hadc1, (ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC));
+	  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 1);
+
+	  // CRITICAL: Keep this to prevent FreeRTOS from crashing
+	  HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
 
 	  uint32_t tick_count = osKernelGetTickCount();
 
 	  for(;;)
 	  {
-	    // 6. Read MPU6050
-	    if(HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 10) == HAL_OK)
+	    // 5. READ MPU6050
+	    if(HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 5) == HAL_OK)
 	    {
-	      sensor_packet.ax = (int16_t)((mpu_buf[0] << 8) | mpu_buf[1]);
-	      sensor_packet.ay = (int16_t)((mpu_buf[2] << 8) | mpu_buf[3]);
-	      sensor_packet.az = (int16_t)((mpu_buf[4] << 8) | mpu_buf[5]);
+	      sensor_packet.ax = (int16_t)((int16_t)mpu_buf[0] << 8 | mpu_buf[1]);
+	      sensor_packet.ay = (int16_t)((int16_t)mpu_buf[2] << 8 | mpu_buf[3]);
+	      sensor_packet.az = (int16_t)((int16_t)mpu_buf[4] << 8 | mpu_buf[5]);
 
-	      // 7. Read ADC via Interrupt
-	      osThreadFlagsClear(ADC_DONE_FLAG);
-	      HAL_ADC_Start_IT(&hadc1);
+	      // Grab latest Mic data from silent DMA memory
+	      sensor_packet.mic = (uint16_t)adc_buffer[0];
 
-	      // Wait for ADC conversion (Max 5ms)
-	      if(osThreadFlagsWait(ADC_DONE_FLAG, osFlagsWaitAny, 5) != osFlagsErrorTimeout)
-	      {
-	        sensor_packet.mic = HAL_ADC_GetValue(&hadc1);
+	      // 6. PUSH TO QUEUE
+	      if (osMessageQueuePut(SensorQueueHandle, &sensor_packet, 0, 0) != osOK) {
+	          droppedSamples++;
 	      }
-
-	      // 8. Push data to the UART Task
-	      osMessageQueuePut(SensorQueueHandle, &sensor_packet, 0, 0);
+	    }
+	    else
+	    {
+	        HAL_I2C_Init(&hi2c1); // Recovery
 	    }
 
-	    // 9. Maintain 1kHz frequency
+	    // 7. Loop exactly at 1kHz (1ms)
 	    tick_count += 1;
 	    osDelayUntil(tick_count);
 	  }
@@ -545,26 +539,32 @@ void StartTask02(void *argument)
 {
   /* USER CODE BEGIN StartTask02 */
 	SensorData_t received;
-	  static char csv_msg[128]; // 'static' is important for DMA stability
+	  static char csv_msg[128];
 	  int len;
 
-	  // Set the flag once so the first loop doesn't wait forever
+	  // IMPORTANT: Set the flag initially so the very first loop can proceed
 	  osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
 
 	  for(;;)
 	  {
-	    // Wait for data from the Sensor Task
+	    // 1. Wait for data from the queue
 	    if(osMessageQueueGet(SensorQueueHandle, &received, NULL, osWaitForever) == osOK)
 	    {
-	      // A. WAIT for the previous DMA transmission to finish
-	      // (This ensures we don't overwrite csv_msg while it's being sent)
-	      osThreadFlagsWait(UART_DONE_FLAG, osFlagsWaitAny, osWaitForever);
+	      // 2. Wait for previous DMA to finish (Timeout of 5ms to prevent total lockups)
+	      osStatus_t status = osThreadFlagsWait(UART_DONE_FLAG, osFlagsWaitAny, 5);
 
-	      // B. Format the data (using commas for CSV compatibility)
+	      if (status == osErrorTimeout) {
+	          // If DMA missed the interrupt, force reset the hardware state and flag
+	          huart1.gState = HAL_UART_STATE_READY;
+	          osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
+	          continue; // Skip this one transmission to let the queue catch up
+	      }
+
+	      // 3. Convert to String
 	      len = snprintf(csv_msg, sizeof(csv_msg), "%d,%d,%d,%u\r\n",
-	                         received.ax, received.ay, received.az, received.mic);
+	                     received.ax, received.ay, received.az, received.mic);
 
-	      // C. Send via DMA
+	      // 4. Send using DMA
 	      if (len > 0) {
 	        HAL_UART_Transmit_DMA(&huart1, (uint8_t*)csv_msg, len);
 	      }

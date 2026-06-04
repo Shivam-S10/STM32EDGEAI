@@ -30,11 +30,8 @@
 /* USER CODE BEGIN PTD */
 typedef struct {
     int16_t ax, ay, az;
-} MPUData_t;
-
-typedef struct {
     uint16_t mic;
-} MicData_t;
+} SensorData_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -51,72 +48,50 @@ typedef struct {
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
-DFSDM_Channel_HandleTypeDef hdfsdm1_channel2;
-
 I2C_HandleTypeDef hi2c1;
-I2C_HandleTypeDef hi2c2;
-
-OSPI_HandleTypeDef hospi1;
-
-SPI_HandleTypeDef hspi3;
 
 UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
-UART_HandleTypeDef huart3;
+DMA_HandleTypeDef hdma_usart1_tx;
 
-/* Definitions for MPU_Task */
-osThreadId_t MPU_TaskHandle;
-const osThreadAttr_t MPU_Task_attributes = {
-  .name = "MPU_Task",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityHigh1,
-};
-/* Definitions for MicTask */
-osThreadId_t MicTaskHandle;
-const osThreadAttr_t MicTask_attributes = {
-  .name = "MicTask",
-  .stack_size = 256 * 4,
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for UARTTask */
 osThreadId_t UARTTaskHandle;
 const osThreadAttr_t UARTTask_attributes = {
   .name = "UARTTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
-/* Definitions for MPU_Queue */
-osMessageQueueId_t MPU_QueueHandle;
-const osMessageQueueAttr_t MPU_Queue_attributes = {
-  .name = "MPU_Queue"
-};
-/* Definitions for MicQueue */
-osMessageQueueId_t MicQueueHandle;
-const osMessageQueueAttr_t MicQueue_attributes = {
-  .name = "MicQueue"
+/* Definitions for SensorQueue */
+osMessageQueueId_t SensorQueueHandle;
+const osMessageQueueAttr_t SensorQueue_attributes = {
+  .name = "SensorQueue"
 };
 /* USER CODE BEGIN PV */
-#define MPU6050_ADDR 0x68 << 1
+#define MPU6050_ADDR (0x68 << 1)
+
+#define ADC_DONE_FLAG   (1U << 0)
+#define UART_DONE_FLAG  (1U << 1)
+
+volatile uint16_t adcValue = 0;
+
+uint32_t droppedSamples = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-void PeriphCommonClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_DFSDM1_Init(void);
-static void MX_OCTOSPI1_Init(void);
-static void MX_SPI3_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_USART2_UART_Init(void);
-static void MX_USART3_UART_Init(void);
-static void MX_USB_OTG_FS_USB_Init(void);
 static void MX_I2C1_Init(void);
-static void MX_I2C2_Init(void);
 void StartDefaultTask(void *argument);
-void StartTask04(void *argument);
-void StartTask05(void *argument);
+void StartTask02(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -152,9 +127,6 @@ int main(void)
   /* Configure the system clock */
   SystemClock_Config();
 
-  /* Configure the peripherals common clocks */
-  PeriphCommonClock_Config();
-
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
@@ -163,15 +135,8 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
-  MX_DFSDM1_Init();
-  MX_OCTOSPI1_Init();
-  MX_SPI3_Init();
   MX_USART1_UART_Init();
-  MX_USART2_UART_Init();
-  MX_USART3_UART_Init();
-  MX_USB_OTG_FS_USB_Init();
   MX_I2C1_Init();
-  MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
   uint8_t data;
 
@@ -203,25 +168,19 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* Create the queue(s) */
-  /* creation of MPU_Queue */
-  MPU_QueueHandle = osMessageQueueNew (50, sizeof(MPUData_t), &MPU_Queue_attributes);
-
-  /* creation of MicQueue */
-  MicQueueHandle = osMessageQueueNew (50, sizeof(MicData_t), &MicQueue_attributes);
+  /* creation of SensorQueue */
+  SensorQueueHandle = osMessageQueueNew (50, sizeof(SensorData_t), &SensorQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of MPU_Task */
-  MPU_TaskHandle = osThreadNew(StartDefaultTask, NULL, &MPU_Task_attributes);
-
-  /* creation of MicTask */
-  MicTaskHandle = osThreadNew(StartTask04, NULL, &MicTask_attributes);
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* creation of UARTTask */
-  UARTTaskHandle = osThreadNew(StartTask05, NULL, &UARTTask_attributes);
+  UARTTaskHandle = osThreadNew(StartTask02, NULL, &UARTTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -263,16 +222,10 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Configure LSE Drive Capability
-  */
-  HAL_PWR_EnableBkUpAccess();
-  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
-
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSE|RCC_OSCILLATORTYPE_MSI;
-  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = 0;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
@@ -298,36 +251,6 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Enable MSI Auto calibration
-  */
-  HAL_RCCEx_EnableMSIPLLMode();
-}
-
-/**
-  * @brief Peripherals Common Clock Configuration
-  * @retval None
-  */
-void PeriphCommonClock_Config(void)
-{
-  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
-
-  /** Initializes the peripherals clock
-  */
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USB|RCC_PERIPHCLK_ADC;
-  PeriphClkInit.AdcClockSelection = RCC_ADCCLKSOURCE_PLLSAI1;
-  PeriphClkInit.UsbClockSelection = RCC_USBCLKSOURCE_PLLSAI1;
-  PeriphClkInit.PLLSAI1.PLLSAI1Source = RCC_PLLSOURCE_MSI;
-  PeriphClkInit.PLLSAI1.PLLSAI1M = 1;
-  PeriphClkInit.PLLSAI1.PLLSAI1N = 24;
-  PeriphClkInit.PLLSAI1.PLLSAI1P = RCC_PLLP_DIV2;
-  PeriphClkInit.PLLSAI1.PLLSAI1Q = RCC_PLLQ_DIV2;
-  PeriphClkInit.PLLSAI1.PLLSAI1R = RCC_PLLR_DIV2;
-  PeriphClkInit.PLLSAI1.PLLSAI1ClockOut = RCC_PLLSAI1_48M2CLK|RCC_PLLSAI1_ADC1CLK;
-  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
@@ -365,7 +288,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
   hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
   hadc1.Init.OversamplingMode = DISABLE;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
@@ -388,44 +311,6 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
-
-}
-
-/**
-  * @brief DFSDM1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_DFSDM1_Init(void)
-{
-
-  /* USER CODE BEGIN DFSDM1_Init 0 */
-
-  /* USER CODE END DFSDM1_Init 0 */
-
-  /* USER CODE BEGIN DFSDM1_Init 1 */
-
-  /* USER CODE END DFSDM1_Init 1 */
-  hdfsdm1_channel2.Instance = DFSDM1_Channel2;
-  hdfsdm1_channel2.Init.OutputClock.Activation = ENABLE;
-  hdfsdm1_channel2.Init.OutputClock.Selection = DFSDM_CHANNEL_OUTPUT_CLOCK_SYSTEM;
-  hdfsdm1_channel2.Init.OutputClock.Divider = 2;
-  hdfsdm1_channel2.Init.Input.Multiplexer = DFSDM_CHANNEL_EXTERNAL_INPUTS;
-  hdfsdm1_channel2.Init.Input.DataPacking = DFSDM_CHANNEL_STANDARD_MODE;
-  hdfsdm1_channel2.Init.Input.Pins = DFSDM_CHANNEL_SAME_CHANNEL_PINS;
-  hdfsdm1_channel2.Init.SerialInterface.Type = DFSDM_CHANNEL_SPI_RISING;
-  hdfsdm1_channel2.Init.SerialInterface.SpiClock = DFSDM_CHANNEL_SPI_CLOCK_INTERNAL;
-  hdfsdm1_channel2.Init.Awd.FilterOrder = DFSDM_CHANNEL_FASTSINC_ORDER;
-  hdfsdm1_channel2.Init.Awd.Oversampling = 1;
-  hdfsdm1_channel2.Init.Offset = 0;
-  hdfsdm1_channel2.Init.RightBitShift = 0x00;
-  if (HAL_DFSDM_ChannelInit(&hdfsdm1_channel2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN DFSDM1_Init 2 */
-
-  /* USER CODE END DFSDM1_Init 2 */
 
 }
 
@@ -478,142 +363,6 @@ static void MX_I2C1_Init(void)
 }
 
 /**
-  * @brief I2C2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_I2C2_Init(void)
-{
-
-  /* USER CODE BEGIN I2C2_Init 0 */
-
-  /* USER CODE END I2C2_Init 0 */
-
-  /* USER CODE BEGIN I2C2_Init 1 */
-
-  /* USER CODE END I2C2_Init 1 */
-  hi2c2.Instance = I2C2;
-  hi2c2.Init.Timing = 0x10B21F61;
-  hi2c2.Init.OwnAddress1 = 0;
-  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c2.Init.OwnAddress2 = 0;
-  hi2c2.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Analogue filter
-  */
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c2, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Digital filter
-  */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c2, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C2_Init 2 */
-
-  /* USER CODE END I2C2_Init 2 */
-
-}
-
-/**
-  * @brief OCTOSPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_OCTOSPI1_Init(void)
-{
-
-  /* USER CODE BEGIN OCTOSPI1_Init 0 */
-
-  /* USER CODE END OCTOSPI1_Init 0 */
-
-  OSPIM_CfgTypeDef OSPIM_Cfg_Struct = {0};
-
-  /* USER CODE BEGIN OCTOSPI1_Init 1 */
-
-  /* USER CODE END OCTOSPI1_Init 1 */
-  /* OCTOSPI1 parameter configuration*/
-  hospi1.Instance = OCTOSPI1;
-  hospi1.Init.FifoThreshold = 1;
-  hospi1.Init.DualQuad = HAL_OSPI_DUALQUAD_DISABLE;
-  hospi1.Init.MemoryType = HAL_OSPI_MEMTYPE_MACRONIX;
-  hospi1.Init.DeviceSize = 32;
-  hospi1.Init.ChipSelectHighTime = 1;
-  hospi1.Init.FreeRunningClock = HAL_OSPI_FREERUNCLK_DISABLE;
-  hospi1.Init.ClockMode = HAL_OSPI_CLOCK_MODE_0;
-  hospi1.Init.ClockPrescaler = 1;
-  hospi1.Init.SampleShifting = HAL_OSPI_SAMPLE_SHIFTING_NONE;
-  hospi1.Init.DelayHoldQuarterCycle = HAL_OSPI_DHQC_DISABLE;
-  hospi1.Init.ChipSelectBoundary = 0;
-  hospi1.Init.DelayBlockBypass = HAL_OSPI_DELAY_BLOCK_BYPASSED;
-  if (HAL_OSPI_Init(&hospi1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  OSPIM_Cfg_Struct.ClkPort = 1;
-  OSPIM_Cfg_Struct.NCSPort = 1;
-  OSPIM_Cfg_Struct.IOLowPort = HAL_OSPIM_IOPORT_1_LOW;
-  if (HAL_OSPIM_Config(&hospi1, &OSPIM_Cfg_Struct, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN OCTOSPI1_Init 2 */
-
-  /* USER CODE END OCTOSPI1_Init 2 */
-
-}
-
-/**
-  * @brief SPI3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_SPI3_Init(void)
-{
-
-  /* USER CODE BEGIN SPI3_Init 0 */
-
-  /* USER CODE END SPI3_Init 0 */
-
-  /* USER CODE BEGIN SPI3_Init 1 */
-
-  /* USER CODE END SPI3_Init 1 */
-  /* SPI3 parameter configuration*/
-  hspi3.Instance = SPI3;
-  hspi3.Init.Mode = SPI_MODE_MASTER;
-  hspi3.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi3.Init.DataSize = SPI_DATASIZE_4BIT;
-  hspi3.Init.CLKPolarity = SPI_POLARITY_LOW;
-  hspi3.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi3.Init.NSS = SPI_NSS_SOFT;
-  hspi3.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
-  hspi3.Init.FirstBit = SPI_FIRSTBIT_MSB;
-  hspi3.Init.TIMode = SPI_TIMODE_DISABLE;
-  hspi3.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-  hspi3.Init.CRCPolynomial = 7;
-  hspi3.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi3.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
-  if (HAL_SPI_Init(&hspi3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SPI3_Init 2 */
-
-  /* USER CODE END SPI3_Init 2 */
-
-}
-
-/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -629,7 +378,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 921600;
+  huart1.Init.BaudRate = 460800;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -662,123 +411,6 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART2_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_RTS_CTS;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
-}
-
-/**
-  * @brief USART3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART3_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART3_Init 0 */
-
-  /* USER CODE END USART3_Init 0 */
-
-  /* USER CODE BEGIN USART3_Init 1 */
-
-  /* USER CODE END USART3_Init 1 */
-  huart3.Instance = USART3;
-  huart3.Init.BaudRate = 115200;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART3_Init 2 */
-
-  /* USER CODE END USART3_Init 2 */
-
-}
-
-/**
-  * @brief USB_OTG_FS Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_OTG_FS_USB_Init(void)
-{
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 0 */
-
-  /* USER CODE END USB_OTG_FS_Init 0 */
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 1 */
-
-  /* USER CODE END USB_OTG_FS_Init 1 */
-  /* USER CODE BEGIN USB_OTG_FS_Init 2 */
-
-  /* USER CODE END USB_OTG_FS_Init 2 */
-
-}
-
-/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -792,9 +424,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
-  /* DMAMUX1_OVR_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMAMUX1_OVR_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMAMUX1_OVR_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
 
 }
 
@@ -805,137 +437,13 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, ST25DV04K_RF_DISABLE_Pin|GPIO_PIN_3|ISM43362_RST_Pin|ISM43362_SPI3_CSN_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, ARD_D10_Pin|ARD_D4_Pin|ARD_D7_Pin|GPIO_PIN_5
-                          |SPBTLE_RF_RST_Pin|ARD_D9_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, ARD_D8_Pin|ISM43362_BOOT0_Pin|ISM43362_WAKEUP_Pin|LED2_Pin
-                          |SPSGRF_915_SDN_Pin|ARD_D5_Pin|SPSGRF_915_SPI3_CSN_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, SPBTLE_RF_SPI3_CSN_Pin|PMOD_RESET_Pin|PMOD_SPI2_SCK_Pin|STSAFE_A110_RESET_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, VL53L0X_XSHUT_Pin|LED3_WIFI__LED4_BLE_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pins : ST25DV04K_RF_DISABLE_Pin PE3 ISM43362_RST_Pin ISM43362_SPI3_CSN_Pin */
-  GPIO_InitStruct.Pin = ST25DV04K_RF_DISABLE_Pin|GPIO_PIN_3|ISM43362_RST_Pin|ISM43362_SPI3_CSN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : ST25DV04K_GPO_Pin SPSGRF_915_GPIO3_EXTI5_Pin SPBTLE_RF_IRQ_EXTI6_Pin ISM43362_DRDY_EXTI1_Pin */
-  GPIO_InitStruct.Pin = ST25DV04K_GPO_Pin|SPSGRF_915_GPIO3_EXTI5_Pin|SPBTLE_RF_IRQ_EXTI6_Pin|ISM43362_DRDY_EXTI1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : BUTTON_EXTI13_Pin VL53L0X_GPIO1_EXTI7_Pin LSM3MDL_DRDY_EXTI8_Pin */
-  GPIO_InitStruct.Pin = BUTTON_EXTI13_Pin|VL53L0X_GPIO1_EXTI7_Pin|LSM3MDL_DRDY_EXTI8_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : ARD_D10_Pin ARD_D4_Pin ARD_D7_Pin PA5
-                           SPBTLE_RF_RST_Pin ARD_D9_Pin */
-  GPIO_InitStruct.Pin = ARD_D10_Pin|ARD_D4_Pin|ARD_D7_Pin|GPIO_PIN_5
-                          |SPBTLE_RF_RST_Pin|ARD_D9_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : ARD_D12_Pin ARD_D11_Pin */
-  GPIO_InitStruct.Pin = ARD_D12_Pin|ARD_D11_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.Alternate = GPIO_AF5_SPI1;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : ARD_D3_Pin */
-  GPIO_InitStruct.Pin = ARD_D3_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(ARD_D3_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : ARD_D6_Pin */
-  GPIO_InitStruct.Pin = ARD_D6_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF2_TIM3;
-  HAL_GPIO_Init(ARD_D6_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : ARD_D8_Pin ISM43362_BOOT0_Pin ISM43362_WAKEUP_Pin LED2_Pin
-                           SPSGRF_915_SDN_Pin ARD_D5_Pin SPSGRF_915_SPI3_CSN_Pin */
-  GPIO_InitStruct.Pin = ARD_D8_Pin|ISM43362_BOOT0_Pin|ISM43362_WAKEUP_Pin|LED2_Pin
-                          |SPSGRF_915_SDN_Pin|ARD_D5_Pin|SPSGRF_915_SPI3_CSN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : LPS22HB_INT_DRDY_EXTI10_Pin LSM6DSL_INT1_EXTI11_Pin USB_OTG_FS_PWR_EN_Pin ARD_D2_Pin
-                           HTS221_DRDY_EXTI15_Pin PMOD_IRQ_EXTI2_Pin */
-  GPIO_InitStruct.Pin = LPS22HB_INT_DRDY_EXTI10_Pin|LSM6DSL_INT1_EXTI11_Pin|USB_OTG_FS_PWR_EN_Pin|ARD_D2_Pin
-                          |HTS221_DRDY_EXTI15_Pin|PMOD_IRQ_EXTI2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : SPBTLE_RF_SPI3_CSN_Pin PMOD_RESET_Pin PMOD_SPI2_SCK_Pin STSAFE_A110_RESET_Pin */
-  GPIO_InitStruct.Pin = SPBTLE_RF_SPI3_CSN_Pin|PMOD_RESET_Pin|PMOD_SPI2_SCK_Pin|STSAFE_A110_RESET_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : VL53L0X_XSHUT_Pin LED3_WIFI__LED4_BLE_Pin */
-  GPIO_InitStruct.Pin = VL53L0X_XSHUT_Pin|LED3_WIFI__LED4_BLE_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : USB_OTG_FS_VBUS_Pin */
-  GPIO_InitStruct.Pin = USB_OTG_FS_VBUS_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(USB_OTG_FS_VBUS_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : USB_OTG_FS_ID_Pin USB_OTG_FS_DM_Pin USB_OTG_FS_DP_Pin */
-  GPIO_InitStruct.Pin = USB_OTG_FS_ID_Pin|USB_OTG_FS_DM_Pin|USB_OTG_FS_DP_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  GPIO_InitStruct.Alternate = GPIO_AF10_OTG_FS;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
-
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -943,7 +451,25 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+    if(hadc->Instance == ADC1)
+    {
+        osThreadFlagsSet(
+                defaultTaskHandle,
+                ADC_DONE_FLAG);
+    }
+}
 
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if(huart->Instance == USART1)
+    {
+        osThreadFlagsSet(
+                UARTTaskHandle,
+                UART_DONE_FLAG);
+    }
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -956,85 +482,95 @@ static void MX_GPIO_Init(void)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-	//  Read MPU6050(accelerometer)  (I2C) - 1ms timeout
-	  MPUData_t mpu_packet;
-	    uint8_t mpu_buf[6];
+	// 1. Initialize variables (Setting to {0} prevents the -23131 garbage)
+	  SensorData_t sensor_packet = {0};
+	  uint8_t mpu_buf[6] = {0};
+	  uint8_t wake = 0; // Fix: Added the missing declaration
 
-	    // Wake up MPU6050 (Done once here)
-	    uint8_t check_reg = 0;
-	    HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &check_reg, 1, 100);
+	  // 2. Wake up MPU6050
+	  HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &wake, 1, 100);
 
-	    for(;;)
+	  // 3. Warm-up: Give hardware time to settle
+	  osDelay(500);
+
+	  // 4. Dummy reads to flush out the "startup" noise from the sensor
+	  for(int i = 0; i < 10; i++) {
+	      HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 10);
+	      osDelay(10);
+	  }
+
+	  // 5. Clear the queue one last time so we start with fresh data
+	  osMessageQueueReset(SensorQueueHandle);
+
+	  uint32_t tick_count = osKernelGetTickCount();
+
+	  for(;;)
+	  {
+	    // 6. Read MPU6050
+	    if(HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 10) == HAL_OK)
 	    {
-	      if(HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 1) == HAL_OK) {
-	          mpu_packet.ax = (int16_t)(mpu_buf[0] << 8 | mpu_buf[1]);
-	          mpu_packet.ay = (int16_t)(mpu_buf[2] << 8 | mpu_buf[3]);
-	          mpu_packet.az = (int16_t)(mpu_buf[4] << 8 | mpu_buf[5]);
+	      sensor_packet.ax = (int16_t)((mpu_buf[0] << 8) | mpu_buf[1]);
+	      sensor_packet.ay = (int16_t)((mpu_buf[2] << 8) | mpu_buf[3]);
+	      sensor_packet.az = (int16_t)((mpu_buf[4] << 8) | mpu_buf[5]);
+
+	      // 7. Read ADC via Interrupt
+	      osThreadFlagsClear(ADC_DONE_FLAG);
+	      HAL_ADC_Start_IT(&hadc1);
+
+	      // Wait for ADC conversion (Max 5ms)
+	      if(osThreadFlagsWait(ADC_DONE_FLAG, osFlagsWaitAny, 5) != osFlagsErrorTimeout)
+	      {
+	        sensor_packet.mic = HAL_ADC_GetValue(&hadc1);
 	      }
 
-	      osMessageQueuePut(MPU_QueueHandle, &mpu_packet, 0, 0);
-	      osDelay(1);
+	      // 8. Push data to the UART Task
+	      osMessageQueuePut(SensorQueueHandle, &sensor_packet, 0, 0);
 	    }
+
+	    // 9. Maintain 1kHz frequency
+	    tick_count += 1;
+	    osDelayUntil(tick_count);
+	  }
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_StartTask04 */
+/* USER CODE BEGIN Header_StartTask02 */
 /**
-* @brief Function implementing the MicTask thread.
+* @brief Function implementing the AI_TASK thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartTask04 */
-void StartTask04(void *argument)
+/* USER CODE END Header_StartTask02 */
+void StartTask02(void *argument)
 {
-  /* USER CODE BEGIN StartTask04 */
-	  /*  StartMicTask */
-	  MicData_t mic_packet;
+  /* USER CODE BEGIN StartTask02 */
+	SensorData_t received;
+	  static char csv_msg[128]; // 'static' is important for DMA stability
+	  int len;
+
+	  // Set the flag once so the first loop doesn't wait forever
+	  osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
 
 	  for(;;)
 	  {
-	    HAL_ADC_Start(&hadc1);
-	    if(HAL_ADC_PollForConversion(&hadc1, 1) == HAL_OK) {
-	        mic_packet.mic = (uint16_t)HAL_ADC_GetValue(&hadc1);
-	    }
-	    HAL_ADC_Stop(&hadc1);
-	    osMessageQueuePut(MicQueueHandle, &mic_packet, 0, 0);
-	    osDelay(1);
-  /* USER CODE END StartTask04 */
-}
-}
-/* USER CODE BEGIN Header_StartTask05 */
-/**
-* @brief Function implementing the UARTTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTask05 */
-void StartTask05(void *argument)
-{
-  /* USER CODE BEGIN StartTask05 */
-	//This is for the UART part
-	  MPUData_t mpu_received;
-	  MicData_t mic_received;
-	  char csv_msg[64];
-
-	  for(;;)
-	  {
-	    // Wait for MPU data
-	    if(osMessageQueueGet(MPU_QueueHandle, &mpu_received, NULL, osWaitForever) == osOK)
+	    // Wait for data from the Sensor Task
+	    if(osMessageQueueGet(SensorQueueHandle, &received, NULL, osWaitForever) == osOK)
 	    {
-	        // Now wait for Mic data so they match up
-	        if(osMessageQueueGet(MicQueueHandle, &mic_received, NULL, osWaitForever) == osOK)
-	        {
-	            // Format and print together
-	            int len = snprintf(csv_msg, sizeof(csv_msg), "%d,%d,%d,%u\r\n",
-	                               mpu_received.ax, mpu_received.ay, mpu_received.az, mic_received.mic);
+	      // A. WAIT for the previous DMA transmission to finish
+	      // (This ensures we don't overwrite csv_msg while it's being sent)
+	      osThreadFlagsWait(UART_DONE_FLAG, osFlagsWaitAny, osWaitForever);
 
-	            HAL_UART_Transmit(&huart1, (uint8_t*)csv_msg, len, 5);
-	        }
+	      // B. Format the data (using commas for CSV compatibility)
+	      len = snprintf(csv_msg, sizeof(csv_msg), "%d,%d,%d,%u\r\n",
+	                         received.ax, received.ay, received.az, received.mic);
+
+	      // C. Send via DMA
+	      if (len > 0) {
+	        HAL_UART_Transmit_DMA(&huart1, (uint8_t*)csv_msg, len);
+	      }
 	    }
-  /* USER CODE END StartTask05 */
-}
+	  }
+  /* USER CODE END StartTask02 */
 }
 
 /**

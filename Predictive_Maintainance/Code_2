@@ -50,6 +50,8 @@ DMA_HandleTypeDef hdma_adc1;
 
 I2C_HandleTypeDef hi2c1;
 
+IWDG_HandleTypeDef hiwdg;
+
 UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
 
@@ -57,15 +59,22 @@ DMA_HandleTypeDef hdma_usart1_tx;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for UARTTask */
 osThreadId_t UARTTaskHandle;
 const osThreadAttr_t UARTTask_attributes = {
   .name = "UARTTask",
-  .stack_size = 1024 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for WatchdogTask */
+osThreadId_t WatchdogTaskHandle;
+const osThreadAttr_t WatchdogTask_attributes = {
+  .name = "WatchdogTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for SensorQueue */
 osMessageQueueId_t SensorQueueHandle;
@@ -77,8 +86,13 @@ const osMessageQueueAttr_t SensorQueue_attributes = {
 volatile uint32_t adc_buffer[1];
 #define ADC_DONE_FLAG   (1U << 0)
 #define UART_DONE_FLAG  (1U << 1)
+#define I2C_DONE_FLAG (1U<<2)
 volatile uint16_t adcValue = 0;
 uint32_t droppedSamples = 0;
+
+// Watchdog health flags
+volatile uint8_t sensorAlive = 0;
+volatile uint8_t uartAlive = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -86,10 +100,12 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_USART1_UART_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_IWDG_Init(void);
 void StartDefaultTask(void *argument);
 void StartTask02(void *argument);
+void StartWatchdogTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -133,16 +149,33 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
-  MX_USART1_UART_Init();
   MX_I2C1_Init();
+  MX_USART1_UART_Init();
+  MX_IWDG_Init();
+
+
   /* USER CODE BEGIN 2 */
-  	uint8_t data = 0x00;
-    HAL_I2C_Mem_Write(&hi2c1, (0x68 << 1), 0x6B, 1, &data, 1, 100);
-    char boot_msg[] = "\r\n--- SYSTEM BOOTING ---\r\n";
-    HAL_UART_Transmit(&huart1, (uint8_t*)boot_msg, strlen(boot_msg), 1000);
-    HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
-    // ------------------------------
+  uint8_t data = 0x00;
+  HAL_I2C_Mem_Write(&hi2c1, (0x68 << 1), 0x6B, 1, &data, 1, 100);
+
+  // Reset detection
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST)) {
+      HAL_Delay(10);
+      HAL_UART_Transmit(&huart1, (uint8_t*)"RESET:WATCHDOG\r\n", 16, 100);
+  } else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST)) {
+      HAL_Delay(10);
+      HAL_UART_Transmit(&huart1, (uint8_t*)"RESET:NORMAL\r\n", 14, 100);
+  }
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+
+  // Give full 2s headroom for RTOS startup
+  HAL_IWDG_Refresh(&hiwdg);
+
+  char boot_msg[] = "\r\n--- SYSTEM BOOTING ---\r\n";
+  HAL_UART_Transmit(&huart1, (uint8_t*)boot_msg, strlen(boot_msg), 1000);
+  HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
   /* USER CODE END 2 */
+
 
   /* Init scheduler */
   osKernelInitialize();
@@ -173,6 +206,9 @@ int main(void)
 
   /* creation of UARTTask */
   UARTTaskHandle = osThreadNew(StartTask02, NULL, &UARTTask_attributes);
+
+  /* creation of WatchdogTask */
+  WatchdogTaskHandle = osThreadNew(StartWatchdogTask, NULL, &WatchdogTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -217,7 +253,8 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = 0;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
@@ -355,6 +392,35 @@ static void MX_I2C1_Init(void)
 }
 
 /**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg.Init.Window = 4095;
+  hiwdg.Init.Reload = 999;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -460,6 +526,23 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
         osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
     }
 }
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+    if(hi2c->Instance == I2C1)
+    {
+        // Wake up the sensor task when I2C finishes reading
+        osThreadFlagsSet(defaultTaskHandle, I2C_DONE_FLAG);
+    }
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+    if(hi2c->Instance == I2C1)
+    {
+        // Wake it up even on error so it doesn't get stuck forever
+        osThreadFlagsSet(defaultTaskHandle, I2C_DONE_FLAG);
+    }
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -475,51 +558,78 @@ void StartDefaultTask(void *argument)
 	SensorData_t sensor_packet = {0};
 	  uint8_t mpu_buf[6] = {0};
 	  uint8_t wake = 0x00;
+	  osStatus_t status;
 
-	  // 1. Wait for peripherals to stabilize
+	  // 1. Give the system a moment to settle after power-on
 	  osDelay(100);
 
-	  // 2. CHECK SENSOR READY
+	  // 2. Initial Hardware Setup (MPU6050)
 	  if (HAL_I2C_IsDeviceReady(&hi2c1, MPU6050_ADDR, 5, 100) != HAL_OK) {
 	      char err_msg[] = "I2C ERROR: MPU6050 NOT FOUND!\r\n";
 	      HAL_UART_Transmit(&huart1, (uint8_t*)err_msg, strlen(err_msg), 1000);
-	      osDelay(2000);
+	      // We don't return/stop here so the system can potentially recover later
 	  }
 
-	  // 3. WAKE UP MPU6050
+	  // Wake up the MPU6050 (Exit Sleep Mode)
 	  HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &wake, 1, 100);
 
-	  // 4. START ADC DMA (And instantly silence the interrupt storm!)
+	  // 3. Start ADC DMA in "Silent Mode"
+	  // Stop first to ensure clean state
 	  HAL_ADC_Stop_DMA(&hadc1);
 	  __HAL_ADC_CLEAR_FLAG(&hadc1, (ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC));
+
+	  // Start DMA - it will update adc_buffer[0] continuously in hardware
 	  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, 1);
 
-	  // CRITICAL: Keep this to prevent FreeRTOS from crashing
+	  // CRITICAL: Disable the ADC DMA interrupt.
+	  // This prevents the CPU from being flooded with interrupts every few microseconds.
 	  HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
 
+	  // Initialize the 1kHz timer variable
 	  uint32_t tick_count = osKernelGetTickCount();
-	  tick_count = osKernelGetTickCount();
+
+	  /* Infinite loop */
 	  for(;;)
 	  {
-	    // 5. READ MPU6050
-	    if(HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6, 5) == HAL_OK)
+	    // 4. Start Non-Blocking I2C Read (Interrupt Mode)
+	    // We request 6 bytes (Accel X, Y, Z) starting from register 0x3B
+	    if(HAL_I2C_Mem_Read_IT(&hi2c1, MPU6050_ADDR, 0x3B, 1, mpu_buf, 6) == HAL_OK)
 	    {
-	      sensor_packet.ax = (int16_t)((int16_t)mpu_buf[0] << 8 | mpu_buf[1]);
-	      sensor_packet.ay = (int16_t)((int16_t)mpu_buf[2] << 8 | mpu_buf[3]);
-	      sensor_packet.az = (int16_t)((int16_t)mpu_buf[4] << 8 | mpu_buf[5]);
-	      // Grab latest Mic data from silent DMA memory
-	      sensor_packet.mic = (uint16_t)adc_buffer[0];
-	      // 6. PUSH TO QUEUE
-	      if (osMessageQueuePut(SensorQueueHandle, &sensor_packet, 0, 0) != osOK) {
-	          droppedSamples++;
+	      // 5. Wait for the I2C Interrupt to signal completion
+	      // This puts the task to sleep, allowing UARTTask to run.
+	      status = osThreadFlagsWait(I2C_DONE_FLAG, osFlagsWaitAny, 5);
+
+	      if (status != osErrorTimeout)
+	      {
+	        // Data is ready! Process raw bytes into 16-bit integers
+	        sensor_packet.ax = (int16_t)((int16_t)mpu_buf[0] << 8 | mpu_buf[1]);
+	        sensor_packet.ay = (int16_t)((int16_t)mpu_buf[2] << 8 | mpu_buf[3]);
+	        sensor_packet.az = (int16_t)((int16_t)mpu_buf[4] << 8 | mpu_buf[5]);
+
+	        // 6. Collect Microphone Data
+	        // This is updated automatically by the background DMA
+	        sensor_packet.mic = (uint16_t)adc_buffer[0];
+
+	        // 7. Push data to the UART Task via Queue
+	        if (osMessageQueuePut(SensorQueueHandle, &sensor_packet, 0, 0) != osOK) {
+	            droppedSamples++; // UART is too slow or baud rate is too low
+	        }
+	      }
+	      else
+	      {
+	          // I2C timed out - possible bus hang or hardware disconnected
+	          HAL_I2C_Init(&hi2c1);
 	      }
 	    }
 	    else
 	    {
-	        HAL_I2C_Init(&hi2c1); // Recovery
+	        // I2C Peripheral busy or error
+	        HAL_I2C_Init(&hi2c1);
 	    }
+	    // Signal watchdog that sensor task is alive
+	    sensorAlive = 1;
 
-	    // 7. Loop exactly at 1kHz (1ms)
+	    // 8. Maintain strict 1kHz Loop Timing (1ms per iteration)
 	    tick_count += 1;
 	    osDelayUntil(tick_count);
 	  }
@@ -536,39 +646,69 @@ void StartDefaultTask(void *argument)
 void StartTask02(void *argument)
 {
   /* USER CODE BEGIN StartTask02 */
-	SensorData_t received;
-	  static char csv_msg[128];
-	  int len;
+		SensorData_t received;
+		static char csv_msg[128];
+		int len;
 
-	  // IMPORTANT: Set the flag initially so the very first loop can proceed
-	  osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
+		osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
 
-	  for(;;)
-	  {
-	    // 1. Wait for data from the queue
-	    if(osMessageQueueGet(SensorQueueHandle, &received, NULL, osWaitForever) == osOK)
-	    {
-	      // 2. Wait for previous DMA to finish (Timeout of 5ms to prevent total lockups)
-	      osStatus_t status = osThreadFlagsWait(UART_DONE_FLAG, osFlagsWaitAny, 5);
+		for(;;)
+		{
+			// 200ms timeout — ensures uartAlive gets set even when queue is empty
+			if(osMessageQueueGet(SensorQueueHandle, &received, NULL, 200) == osOK)
+			{
+				osStatus_t status = osThreadFlagsWait(UART_DONE_FLAG, osFlagsWaitAny, 5);
 
-	      if (status == osErrorTimeout) {
-	          // If DMA missed the interrupt, force reset the hardware state and flag
-	          huart1.gState = HAL_UART_STATE_READY;
-	          osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
-	          continue; // Skip this one transmission to let the queue catch up
-	      }
+				if (status == osErrorTimeout) {
+					huart1.gState = HAL_UART_STATE_READY;
+					osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
+					uartAlive = 1;
+					continue;
+				}
 
-	      // 3. Convert to String
-	      len = snprintf(csv_msg, sizeof(csv_msg), "%d,%d,%d,%u\r\n",
-	                     received.ax, received.ay, received.az, received.mic);
+				len = snprintf(csv_msg, sizeof(csv_msg), "%d,%d,%d,%u\r\n",
+							   received.ax, received.ay, received.az, received.mic);
 
-	      // 4. Send using DMA
-	      if (len > 0) {
-	        HAL_UART_Transmit_DMA(&huart1, (uint8_t*)csv_msg, len);
-	      }
-	    }
-	  }
+				if (len > 0) {
+					HAL_UART_Transmit_DMA(&huart1, (uint8_t*)csv_msg, len);
+				}
+			}
+
+			// Reached whether data came or 200ms timed out
+			uartAlive = 1;
+		}
   /* USER CODE END StartTask02 */
+}
+
+/* USER CODE BEGIN Header_StartWatchdogTask */
+/**
+* @brief Function implementing the WatchdogTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartWatchdogTask */
+void StartWatchdogTask(void *argument)
+{
+  /* USER CODE BEGIN StartWatchdogTask */
+    // Kick immediately so RTOS startup has full 2s
+    HAL_IWDG_Refresh(&hiwdg);
+
+    // Wait for both tasks to finish their startup routines
+    osDelay(1500);
+
+    for(;;)
+    {
+        osDelay(500);
+
+        if(sensorAlive && uartAlive)
+        {
+            sensorAlive = 0;
+            uartAlive = 0;
+            HAL_IWDG_Refresh(&hiwdg);
+        }
+        // If either flag not set, dog doesn't get fed → resets after 2s
+    }
+  /* USER CODE END StartWatchdogTask */
 }
 
 /**

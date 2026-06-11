@@ -49,6 +49,7 @@ ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
 
 I2C_HandleTypeDef hi2c1;
+DMA_HandleTypeDef hdma_i2c1_rx;
 
 IWDG_HandleTypeDef hiwdg;
 
@@ -59,21 +60,21 @@ DMA_HandleTypeDef hdma_usart1_tx;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 256 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for UARTTask */
 osThreadId_t UARTTaskHandle;
 const osThreadAttr_t UARTTask_attributes = {
   .name = "UARTTask",
-  .stack_size = 512 * 4,
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for WatchdogTask */
 osThreadId_t WatchdogTaskHandle;
 const osThreadAttr_t WatchdogTask_attributes = {
   .name = "WatchdogTask",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for SensorQueue */
@@ -100,8 +101,8 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_I2C1_Init(void);
 static void MX_IWDG_Init(void);
 void StartDefaultTask(void *argument);
 void StartTask02(void *argument);
@@ -149,11 +150,9 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
-  MX_I2C1_Init();
   MX_USART1_UART_Init();
+  MX_I2C1_Init();
   MX_IWDG_Init();
-
-
   /* USER CODE BEGIN 2 */
   uint8_t data = 0x00;
   HAL_I2C_Mem_Write(&hi2c1, (0x68 << 1), 0x6B, 1, &data, 1, 100);
@@ -175,7 +174,6 @@ int main(void)
   HAL_UART_Transmit(&huart1, (uint8_t*)boot_msg, strlen(boot_msg), 1000);
   HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
   /* USER CODE END 2 */
-
 
   /* Init scheduler */
   osKernelInitialize();
@@ -485,6 +483,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
 
 }
 
@@ -556,9 +557,9 @@ void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
 	SensorData_t sensor_packet = {0};
-	  uint8_t mpu_buf[6] = {0};
-	  uint8_t wake = 0x00;
-	  osStatus_t status;
+	uint8_t mpu_buf[6] = {0};
+	uint8_t wake = 0x00;
+	osStatus_t status;
 
 	  // 1. Give the system a moment to settle after power-on
 	  osDelay(100);
@@ -567,14 +568,9 @@ void StartDefaultTask(void *argument)
 	  if (HAL_I2C_IsDeviceReady(&hi2c1, MPU6050_ADDR, 5, 100) != HAL_OK) {
 	      char err_msg[] = "I2C ERROR: MPU6050 NOT FOUND!\r\n";
 	      HAL_UART_Transmit(&huart1, (uint8_t*)err_msg, strlen(err_msg), 1000);
-	      // We don't return/stop here so the system can potentially recover later
 	  }
-
-	  // Wake up the MPU6050 (Exit Sleep Mode)
 	  HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &wake, 1, 100);
-
 	  // 3. Start ADC DMA in "Silent Mode"
-	  // Stop first to ensure clean state
 	  HAL_ADC_Stop_DMA(&hadc1);
 	  __HAL_ADC_CLEAR_FLAG(&hadc1, (ADC_FLAG_OVR | ADC_FLAG_EOS | ADC_FLAG_EOC));
 
@@ -692,14 +688,11 @@ void StartWatchdogTask(void *argument)
   /* USER CODE BEGIN StartWatchdogTask */
     // Kick immediately so RTOS startup has full 2s
     HAL_IWDG_Refresh(&hiwdg);
-
     // Wait for both tasks to finish their startup routines
     osDelay(1500);
-
     for(;;)
     {
         osDelay(500);
-
         if(sensorAlive && uartAlive)
         {
             sensorAlive = 0;

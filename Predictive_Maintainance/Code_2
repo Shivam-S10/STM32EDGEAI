@@ -1,4 +1,3 @@
-
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -25,11 +24,6 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
-#include "kiss_fft.h"
-#include "scaler_params.h"
-#include "ai_platform.h"
-#include "network.h"
-#include "network_data.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -42,20 +36,7 @@ typedef struct {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define WINDOW_SIZE 256
-#define FFT_SIZE 256
-#define HOP_SIZE (WINDOW_SIZE / 2)
-#define FEATURE_COUNT 20
-#define PI 3.14159265f
-typedef struct
-{
-    float ax[WINDOW_SIZE];
-    float ay[WINDOW_SIZE];
-    float az[WINDOW_SIZE];
-    float mic[WINDOW_SIZE];
-    float accel_mag[WINDOW_SIZE];
 
-} FeatureWindow_t;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -69,102 +50,49 @@ DMA_HandleTypeDef hdma_adc1;
 
 I2C_HandleTypeDef hi2c1;
 DMA_HandleTypeDef hdma_i2c1_rx;
+IWDG_HandleTypeDef hiwdg;
 
 UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
-
+DMA_HandleTypeDef hdma_usart1_rx;
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityRealtime,
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for UARTTask */
 osThreadId_t UARTTaskHandle;
 const osThreadAttr_t UARTTask_attributes = {
   .name = "UARTTask",
-  .stack_size = 1024 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
-/* Definitions for AITask */
-osThreadId_t AITaskHandle;
-const osThreadAttr_t AITask_attributes = {
-  .name = "AITask",
-  .stack_size = 4096 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-/* Definitions for FeatureTask */
-osThreadId_t FeatureTaskHandle;
-const osThreadAttr_t FeatureTask_attributes = {
-  .name = "FeatureTask",
-  .stack_size = 4096 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+/* Definitions for WatchdogTask */
+osThreadId_t WatchdogTaskHandle;
+const osThreadAttr_t WatchdogTask_attributes = {
+  .name = "WatchdogTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for SensorQueue */
 osMessageQueueId_t SensorQueueHandle;
 const osMessageQueueAttr_t SensorQueue_attributes = {
   .name = "SensorQueue"
 };
-/* Definitions for FeatureQueue */
-osMessageQueueId_t FeatureQueueHandle;
-const osMessageQueueAttr_t FeatureQueue_attributes = {
-  .name = "FeatureQueue"
-};
 /* USER CODE BEGIN PV */
-static ai_handle network_handle = AI_HANDLE_NULL;
-AI_ALIGNED(32) static ai_u8 activations[AI_NETWORK_DATA_ACTIVATIONS_SIZE];
-static ai_buffer ai_input[AI_NETWORK_IN_NUM];
-static ai_buffer ai_output[AI_NETWORK_OUT_NUM];
-float ml_output[AI_NETWORK_OUT_1_SIZE];
 #define MPU6050_ADDR (0x68 << 1)
 volatile uint32_t adc_buffer[1];
 #define ADC_DONE_FLAG   (1U << 0)
 #define UART_DONE_FLAG  (1U << 1)
 #define I2C_DONE_FLAG (1U<<2)
-#define AI_READY_FLAG   (1U << 3)
 volatile uint16_t adcValue = 0;
 uint32_t droppedSamples = 0;
 
-
-//--------------------------------------------------------FFT-----------------------------------------------------------
-
-float ax_buffer[WINDOW_SIZE];
-float ay_buffer[WINDOW_SIZE];
-float az_buffer[WINDOW_SIZE];
-float mic_buffer[WINDOW_SIZE];
-
-float accel_mag[WINDOW_SIZE];
-
-float ax_centered[WINDOW_SIZE];
-float ay_centered[WINDOW_SIZE];
-float az_centered[WINDOW_SIZE];
-float mic_centered[WINDOW_SIZE];
-float accel_mag_centered[WINDOW_SIZE];
-
-uint16_t sample_index = 0;
-//uint8_t window_ready = 0;
-
-float fft_input[FFT_SIZE];
-float fft_output[FFT_SIZE];
-
-float mic_fft_input[FFT_SIZE];
-float mic_fft_output[FFT_SIZE];
-
-float fft_mag[FFT_SIZE/2];
-float hann_window[FFT_SIZE];
-
-float feature_vector[FEATURE_COUNT]; //goes into your ML model
-
-float accel_fft_bins[6];
-float mic_fft_bins[4];
-
-kiss_fft_cfg fft_cfg;
-kiss_fft_cpx fft_in[FFT_SIZE];
-kiss_fft_cpx fft_out[FFT_SIZE];
-
-FeatureWindow_t feature_window;
-
+// Watchdog health flags
+volatile uint8_t sensorAlive = 0;
+volatile uint8_t uartAlive = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -172,30 +100,14 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_USART1_UART_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_IWDG_Init(void);
 void StartDefaultTask(void *argument);
 void StartTask02(void *argument);
-void StartAITask(void *argument);
-void StartFeatureTask(void *argument);
+void StartWatchdogTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-
-void ExtractFeatures(void);
-
-float ComputeMean(float *data);
-float ComputeRMS(float *data);
-float ComputePeak(float *data);
-float ComputeSTD(float *data);
-float ComputeKurtosis(float *data, float std);
-
-void ComputeAccelFFT(float *input, float *output_bins);
-void ComputeMicFFT(float *input, float *output_bins);
-
-float SpectralCentroid(float *input);
-float SpectralEntropy(float *input);
-
-void StandardizeFeatures(void);
 
 /* USER CODE END PFP */
 
@@ -237,50 +149,33 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
-  MX_USART1_UART_Init();
   MX_I2C1_Init();
+  MX_USART1_UART_Init();
+  MX_IWDG_Init();
+
+
   /* USER CODE BEGIN 2 */
-  ai_error ai_err;
   uint8_t data = 0x00;
   HAL_I2C_Mem_Write(&hi2c1, (0x68 << 1), 0x6B, 1, &data, 1, 100);
 
+  // Reset detection
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST)) {
+      HAL_Delay(10);
+      HAL_UART_Transmit(&huart1, (uint8_t*)"RESET:WATCHDOG\r\n", 16, 100);
+  } else if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST)) {
+      HAL_Delay(10);
+      HAL_UART_Transmit(&huart1, (uint8_t*)"RESET:NORMAL\r\n", 14, 100);
+  }
+  __HAL_RCC_CLEAR_RESET_FLAGS();
 
+  // Give full 2s headroom for RTOS startup
+  HAL_IWDG_Refresh(&hiwdg);
 
   char boot_msg[] = "\r\n--- SYSTEM BOOTING ---\r\n";
   HAL_UART_Transmit(&huart1, (uint8_t*)boot_msg, strlen(boot_msg), 1000);
   HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
-
-  fft_cfg = kiss_fft_alloc(FFT_SIZE, 0, NULL, NULL);
-  for(int i = 0; i < FFT_SIZE; i++)
-  {
-      hann_window[i] =
-      0.5f * (1.0f -
-      cosf((2.0f * PI * i)/(FFT_SIZE - 1)));
-  }
-
-    // 1. Create the AI network
-    ai_err = ai_network_create(&network_handle, AI_NETWORK_DATA_CONFIG);
-    if (ai_err.type != AI_ERROR_NONE) {
-        char err_msg[64];
-        snprintf(err_msg, sizeof(err_msg), "AI Create Error: type=%d code=%d\r\n", ai_err.type, ai_err.code);
-        HAL_UART_Transmit(&huart1, (uint8_t*)err_msg, strlen(err_msg), 1000);
-    }
-
-    // 2. Initialize the AI network with weights and activations
-    const ai_network_params ai_params = AI_NETWORK_PARAMS_INIT(
-        AI_NETWORK_DATA_WEIGHTS(ai_network_data_weights_get()),
-        AI_NETWORK_DATA_ACTIVATIONS(activations)
-    );
-
-    if (!ai_network_init(network_handle, &ai_params)) {
-         ai_err = ai_network_get_error(network_handle);
-         char err_msg[64];
-         snprintf(err_msg, sizeof(err_msg), "AI Init Error: type=%d code=%d\r\n", ai_err.type, ai_err.code);
-         HAL_UART_Transmit(&huart1, (uint8_t*)err_msg, strlen(err_msg), 1000);
-    }
-
-
   /* USER CODE END 2 */
+
 
   /* Init scheduler */
   osKernelInitialize();
@@ -301,9 +196,6 @@ int main(void)
   /* creation of SensorQueue */
   SensorQueueHandle = osMessageQueueNew (50, sizeof(SensorData_t), &SensorQueue_attributes);
 
-  /* creation of FeatureQueue */
-  FeatureQueueHandle = osMessageQueueNew (2, sizeof(uint8_t), &FeatureQueue_attributes);
-
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -315,11 +207,8 @@ int main(void)
   /* creation of UARTTask */
   UARTTaskHandle = osThreadNew(StartTask02, NULL, &UARTTask_attributes);
 
-  /* creation of AITask */
-  AITaskHandle = osThreadNew(StartAITask, NULL, &AITask_attributes);
-
-  /* creation of FeatureTask */
-  FeatureTaskHandle = osThreadNew(StartFeatureTask, NULL, &FeatureTask_attributes);
+  /* creation of WatchdogTask */
+  WatchdogTaskHandle = osThreadNew(StartWatchdogTask, NULL, &WatchdogTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -364,7 +253,8 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_MSI;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = 0;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_6;
@@ -502,6 +392,35 @@ static void MX_I2C1_Init(void)
 }
 
 /**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg.Init.Window = 4095;
+  hiwdg.Init.Reload = 999;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
+
+}
+
+/**
   * @brief USART1 Initialization Function
   * @param None
   * @retval None
@@ -566,9 +485,6 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
-  /* DMA1_Channel3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
 
 }
 
@@ -579,35 +495,13 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : PE3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LED_GREEN_Pin */
-  GPIO_InitStruct.Pin = LED_GREEN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LED_GREEN_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -649,371 +543,6 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
         osThreadFlagsSet(defaultTaskHandle, I2C_DONE_FLAG);
     }
 }
-
-//-----------------------------------------------intermediate FFT functions-----------------------------------------------------
-float ComputeMean(float *data)
-{
-    float sum = 0;
-
-    for(int i=0;i<WINDOW_SIZE;i++)
-    {
-        sum += data[i];
-    }
-
-    return sum / WINDOW_SIZE;
-}
-
-float ComputeRMS(float *data)
-{
-    float sum = 0;
-
-    for(int i=0;i<WINDOW_SIZE;i++)
-    {
-        sum += data[i] * data[i];
-    }
-
-    return sqrtf(sum / WINDOW_SIZE);
-}
-
-float ComputePeak(float *data)
-{
-    float peak = 0;
-
-    for(int i=0;i<WINDOW_SIZE;i++)
-    {
-        float val = fabsf(data[i]);
-
-        if(val > peak)
-            peak = val;
-    }
-
-    return peak;
-}
-
-float ComputeSTD(float *data)
-{
-    float sum = 0.0f;
-
-    for(int i = 0; i < WINDOW_SIZE; i++)
-    {
-        sum += data[i] * data[i];
-    }
-
-    return sqrtf(sum / WINDOW_SIZE);
-}
-
-float ComputeKurtosis(float *data, float std)
-{
-    float sum = 0.0f;
-
-    if(std < 0.000001f)
-        return 0.0f;
-
-    for(int i = 0; i < WINDOW_SIZE; i++)
-    {
-        float normalized = data[i] / std;
-
-        sum += normalized *
-               normalized *
-               normalized *
-               normalized;
-    }
-
-    return sum / WINDOW_SIZE;
-}
-
-void CenterData(float *input, float *output)
-{
-    float mean = ComputeMean(input);
-
-    for(int i = 0; i < WINDOW_SIZE; i++)
-    {
-        output[i] = input[i] - mean;
-    }
-}
-
-void ComputeAccelFFT(float *input, float *output_bins)
-{
-    float selected[6];
-    float total = 0.0f;
-
-    float windowed[FFT_SIZE];
-
-    for(int i=0;i<FFT_SIZE;i++)
-        windowed[i] = input[i] * hann_window[i];
-
-    for(int i=0;i<FFT_SIZE;i++)
-    {
-        fft_in[i].r = windowed[i];
-        fft_in[i].i = 0.0f;
-    }
-
-    kiss_fft(fft_cfg, fft_in, fft_out);
-
-    int bins[6] = {9,10,11,80,81,82};
-
-    for(int i=0;i<6;i++)
-    {
-        float re = fft_out[bins[i]].r;
-        float im = fft_out[bins[i]].i;
-
-        selected[i] =
-        sqrtf(re*re + im*im)/(FFT_SIZE/2.0f);
-
-        total += selected[i];
-    }
-
-    total += 1e-8f;
-
-    for(int i=0;i<6;i++)
-    {
-        output_bins[i] =
-        selected[i]/total;
-    }
-}
-
-void ComputeMicFFT(float *input, float *output_bins)
-{
-    float selected[4];
-    float total = 0.0f;
-
-    float windowed[FFT_SIZE];
-
-    for(int i=0;i<FFT_SIZE;i++)
-        windowed[i] = input[i] * hann_window[i];
-
-    for(int i=0;i<FFT_SIZE;i++)
-    {
-        fft_in[i].r = windowed[i];
-        fft_in[i].i = 0.0f;
-    }
-
-    kiss_fft(fft_cfg, fft_in, fft_out);
-
-    int bins[3] = {9,10,11};
-
-    for(int i=0;i<3;i++)
-    {
-        float re = fft_out[bins[i]].r;
-        float im = fft_out[bins[i]].i;
-
-        selected[i] =
-        sqrtf(re*re + im*im)/(FFT_SIZE/2.0f);
-
-        total += selected[i];
-    }
-
-    float band_sum = 0.0f;
-
-    for(int i=45;i<60;i++)
-    {
-        float re = fft_out[i].r;
-        float im = fft_out[i].i;
-
-        band_sum +=
-        sqrtf(re*re + im*im)/(FFT_SIZE/2.0f);
-    }
-
-    selected[3] = band_sum;
-    total += band_sum;
-
-    total += 1e-8f;
-
-    for(int i=0;i<4;i++)
-    {
-        output_bins[i] =
-        selected[i]/total;
-    }
-}
-
-float SpectralCentroid(float *input)
-{
-    float mag_sum = 0.0f;
-    float weighted_sum = 0.0f;
-
-    float windowed[FFT_SIZE];
-
-    for(int i=0;i<FFT_SIZE;i++)
-        windowed[i] = input[i] * hann_window[i];
-
-    for(int i=0;i<FFT_SIZE;i++)
-    {
-        fft_in[i].r = windowed[i];
-        fft_in[i].i = 0;
-    }
-
-    kiss_fft(fft_cfg, fft_in, fft_out);
-
-    for(int i=0;i<=FFT_SIZE/2;i++)
-    {
-        float mag =
-        sqrtf(
-        fft_out[i].r*fft_out[i].r +
-        fft_out[i].i*fft_out[i].i);
-
-        float freq =
-        (1000.0f * i)/FFT_SIZE;
-
-        mag_sum += mag;
-        weighted_sum += freq * mag;
-    }
-
-    return weighted_sum/(mag_sum + 1e-8f);
-}
-
-float SpectralEntropy(float *input)
-{
-    float psd[FFT_SIZE/2 + 1];
-    float total = 0.0f;
-    float entropy = 0.0f;
-
-    float windowed[FFT_SIZE];
-
-    for(int i=0;i<FFT_SIZE;i++)
-        windowed[i] = input[i] * hann_window[i];
-
-    for(int i=0;i<FFT_SIZE;i++)
-    {
-        fft_in[i].r = windowed[i];
-        fft_in[i].i = 0;
-    }
-
-    kiss_fft(fft_cfg, fft_in, fft_out);
-
-    for(int i=0;i<=FFT_SIZE/2;i++)
-    {
-        float mag =
-        sqrtf(
-        fft_out[i].r*fft_out[i].r +
-        fft_out[i].i*fft_out[i].i);
-
-        psd[i] = mag * mag;
-        total += psd[i];
-    }
-
-    total += 1e-8f;
-
-    for(int i=0;i<= FFT_SIZE/2;i++)
-    {
-        float p = psd[i]/total;
-
-        if(p > 0.0f)
-        {
-            entropy -= p * logf(p);
-        }
-    }
-
-    return entropy;
-}
-
-void ExtractFeatures(void)
-{
-    CenterData(mic_buffer, mic_centered);
-    CenterData(accel_mag, accel_mag_centered);
-
-    //--------------------------------
-    // Accel magnitude statistics
-    //--------------------------------
-
-    float peak_A =
-    ComputePeak(accel_mag_centered);
-
-    float std_A =
-    ComputeSTD(accel_mag_centered);
-
-    float kurt_A =
-    ComputeKurtosis(accel_mag_centered,
-                    std_A);
-
-    //--------------------------------
-    // Mic statistics
-    //--------------------------------
-
-    float peak_mic =
-    ComputePeak(mic_centered);
-
-    float std_mic =
-    ComputeSTD(mic_centered);
-
-    float kurt_mic =
-    ComputeKurtosis(mic_centered,
-                    std_mic);
-
-    //--------------------------------
-    // FFT Features
-    //--------------------------------
-
-    ComputeAccelFFT(accel_mag_centered,
-                    accel_fft_bins);
-
-    ComputeMicFFT(mic_centered,
-                  mic_fft_bins);
-
-    //--------------------------------
-    // Spectral Features
-    //--------------------------------
-
-    float centroid_A =
-    SpectralCentroid(accel_mag_centered);
-
-    float centroid_mic =
-    SpectralCentroid(mic_centered);
-
-    float entropy_A =
-    SpectralEntropy(accel_mag_centered);
-
-    float entropy_mic =
-    SpectralEntropy(mic_centered);
-
-    //--------------------------------
-    // Build feature vector
-    //--------------------------------
-
-    feature_vector[0] = peak_A;
-    feature_vector[1] = std_A;
-    feature_vector[2] = kurt_A;
-
-    feature_vector[3] = peak_mic;
-    feature_vector[4] = std_mic;
-    feature_vector[5] = kurt_mic;
-
-    feature_vector[6]  = accel_fft_bins[0];
-    feature_vector[7]  = accel_fft_bins[1];
-    feature_vector[8]  = accel_fft_bins[2];
-    feature_vector[9]  = accel_fft_bins[3];
-    feature_vector[10] = accel_fft_bins[4];
-    feature_vector[11] = accel_fft_bins[5];
-
-    feature_vector[12] = mic_fft_bins[0];
-    feature_vector[13] = mic_fft_bins[1];
-    feature_vector[14] = mic_fft_bins[2];
-    feature_vector[15] = mic_fft_bins[3];
-
-    feature_vector[16] = centroid_A;
-    feature_vector[17] = centroid_mic;
-
-    feature_vector[18] = entropy_A;
-    feature_vector[19] = entropy_mic;
-}
-
-void StandardizeFeatures(void)
-{
-    for(int i = 0; i < FEATURE_COUNT; i++)
-    {
-        if(SCALER_STD[i] > 0.000001f)
-        {
-            feature_vector[i] =
-            (feature_vector[i] - SCALER_MEAN[i]) /
-            SCALER_STD[i];
-        }
-        else
-        {
-        	feature_vector[i]=0.0f;
-        }
-    }
-}
-
-char uart_msg[8192];
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -1030,6 +559,7 @@ void StartDefaultTask(void *argument)
 	  uint8_t mpu_buf[6] = {0};
 	  uint8_t wake = 0x00;
 	  osStatus_t status;
+
 	  // 1. Give the system a moment to settle after power-on
 	  osDelay(100);
 
@@ -1080,82 +610,10 @@ void StartDefaultTask(void *argument)
 	        // This is updated automatically by the background DMA
 	        sensor_packet.mic = (uint16_t)adc_buffer[0];
 
-
-	        // 7. preparing buffer
-	        ax_buffer[sample_index] = (float)sensor_packet.ax;
-	        ay_buffer[sample_index] = (float)sensor_packet.ay;
-	        az_buffer[sample_index] = (float)sensor_packet.az;
-
-	        mic_buffer[sample_index] = (float)sensor_packet.mic;
-
-	        accel_mag[sample_index] =
-	        sqrtf(
-	            ax_buffer[sample_index] * ax_buffer[sample_index] +
-	            ay_buffer[sample_index] * ay_buffer[sample_index] +
-	            az_buffer[sample_index] * az_buffer[sample_index]
-	        );
-
-	        sample_index++;
-
-	        if(sample_index >= WINDOW_SIZE)
-	        {
-	        	memcpy(feature_window.ax,
-	        	       ax_buffer,
-	        	       sizeof(ax_buffer));
-
-	        	memcpy(feature_window.ay,
-	        	       ay_buffer,
-	        	       sizeof(ay_buffer));
-
-	        	memcpy(feature_window.az,
-	        	       az_buffer,
-	        	       sizeof(az_buffer));
-
-	        	memcpy(feature_window.mic,
-	        	       mic_buffer,
-	        	       sizeof(mic_buffer));
-
-	        	memcpy(feature_window.accel_mag,
-	        	       accel_mag,
-	        	       sizeof(accel_mag));
-
-	        	uint8_t dummy = 1;
-
-	        	if(osMessageQueuePut(
-	        	    FeatureQueueHandle,
-	        	    &dummy,
-	        	    0,
-	        	    0) != osOK)
-	        	{
-	        	    droppedSamples++;
-	        	}
-
-
-	            // Shift second half -> first half
-	            memmove(ax_buffer,
-	                    &ax_buffer[HOP_SIZE],
-	                    HOP_SIZE * sizeof(float));
-
-	            memmove(ay_buffer,
-	                    &ay_buffer[HOP_SIZE],
-	                    HOP_SIZE * sizeof(float));
-
-	            memmove(az_buffer,
-	                    &az_buffer[HOP_SIZE],
-	                    HOP_SIZE * sizeof(float));
-
-	            memmove(mic_buffer,
-	                    &mic_buffer[HOP_SIZE],
-	                    HOP_SIZE * sizeof(float));
-
-	            memmove(accel_mag,
-	                    &accel_mag[HOP_SIZE],
-	                    HOP_SIZE * sizeof(float));
-
-	            // Next samples continue from middle
-	            sample_index = HOP_SIZE;
+	        // 7. Push data to the UART Task via Queue
+	        if (osMessageQueuePut(SensorQueueHandle, &sensor_packet, 0, 0) != osOK) {
+	            droppedSamples++; // UART is too slow or baud rate is too low
 	        }
-
 	      }
 	      else
 	      {
@@ -1168,6 +626,8 @@ void StartDefaultTask(void *argument)
 	        // I2C Peripheral busy or error
 	        HAL_I2C_Init(&hi2c1);
 	    }
+	    // Signal watchdog that sensor task is alive
+	    sensorAlive = 1;
 
 	    // 8. Maintain strict 1kHz Loop Timing (1ms per iteration)
 	    tick_count += 1;
@@ -1186,178 +646,69 @@ void StartDefaultTask(void *argument)
 void StartTask02(void *argument)
 {
   /* USER CODE BEGIN StartTask02 */
-	for(;;)
-	  {
-	      // 1. Sleep until the FeatureTask says the feature_vector is ready
-	      osThreadFlagsWait(AI_READY_FLAG, osFlagsWaitAny, osWaitForever);
+		SensorData_t received;
+		static char csv_msg[128];
+		int len;
 
-	      // 2. Map data and run AI Inference
-	      ai_input[0].data = AI_HANDLE_PTR(feature_vector);
-	      ai_output[0].data = AI_HANDLE_PTR(ml_output);
+		osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
 
-	      ai_i32 n_batch = ai_network_run(network_handle, &ai_input[0], &ai_output[0]);
+		for(;;)
+		{
+			// 200ms timeout — ensures uartAlive gets set even when queue is empty
+			if(osMessageQueueGet(SensorQueueHandle, &received, NULL, 200) == osOK)
+			{
+				osStatus_t status = osThreadFlagsWait(UART_DONE_FLAG, osFlagsWaitAny, 5);
 
-	      if (n_batch == 1)
-	      {
-	          // 3. Determine if it is an anomaly
-	          // Assuming your model outputs 2 classes: Index 0 = Normal, Index 1 = Anomaly
-	          int predicted_class = (ml_output[1] > ml_output[0]) ? 1 : 0;
+				if (status == osErrorTimeout) {
+					huart1.gState = HAL_UART_STATE_READY;
+					osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
+					uartAlive = 1;
+					continue;
+				}
 
-	          if (predicted_class == 1)
-	          {
-	              // ANOMALY DETECTED: Red Light ON, Green Light OFF
-	              HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);   // Example Red Pin
-	              HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);  // Example Green Pin
+				len = snprintf(csv_msg, sizeof(csv_msg), "%d,%d,%d,%u\r\n",
+							   received.ax, received.ay, received.az, received.mic);
 
-	              // Optional: Send a quick alert over UART
-	              char alert_msg[] = "ANOMALY DETECTED!\r\n";
-	              HAL_UART_Transmit(&huart1, (uint8_t*)alert_msg, strlen(alert_msg), 100);
-	          }
-	          else
-	          {
-	              // NORMAL OPERATION: Green Light ON, Red Light OFF
-	              HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);    // Example Green Pin
-	              HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET); // Example Red Pin
-	          }
-	      }
-	  }
+				if (len > 0) {
+					HAL_UART_Transmit_DMA(&huart1, (uint8_t*)csv_msg, len);
+				}
+			}
+
+			// Reached whether data came or 200ms timed out
+			uartAlive = 1;
+		}
   /* USER CODE END StartTask02 */
 }
 
-/* USER CODE BEGIN Header_StartAITask */
+/* USER CODE BEGIN Header_StartWatchdogTask */
 /**
-* @brief Function implementing the AITask thread.
+* @brief Function implementing the WatchdogTask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartAITask */
-void StartAITask(void *argument)
+/* USER CODE END Header_StartWatchdogTask */
+void StartWatchdogTask(void *argument)
 {
-  /* USER CODE BEGIN StartAITask */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartAITask */
-}
+  /* USER CODE BEGIN StartWatchdogTask */
+    // Kick immediately so RTOS startup has full 2s
+    HAL_IWDG_Refresh(&hiwdg);
 
-/* USER CODE BEGIN Header_StartFeatureTask */
-/**
-* @brief Function implementing the FeatureTask thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartFeatureTask */
-void StartFeatureTask(void *argument)
-{
-  /* USER CODE BEGIN StartFeatureTask */
-  /* Infinite loop */
-	uint8_t dummy;
-	for(;;)
-	    {
-	        if(osMessageQueueGet(
-	            FeatureQueueHandle,
-	            &dummy,								//wakes up only when default task puts message in feature queue after 256 samples are collected
-	            NULL,
-	            osWaitForever) == osOK)
-	        {
-	            // Copy snapshot into processing buffers
+    // Wait for both tasks to finish their startup routines
+    osDelay(1500);
 
-	            memcpy(ax_buffer,
-	                   feature_window.ax,
-	                   sizeof(ax_buffer));
+    for(;;)
+    {
+        osDelay(500);
 
-	            memcpy(ay_buffer,
-	                   feature_window.ay,
-	                   sizeof(ay_buffer));
-
-	            memcpy(az_buffer,
-	                   feature_window.az,
-	                   sizeof(az_buffer));
-
-	            memcpy(mic_buffer,
-	                   feature_window.mic,
-	                   sizeof(mic_buffer));
-
-	            memcpy(accel_mag,
-	                   feature_window.accel_mag,
-	                   sizeof(accel_mag));
-
-	            // Run DSP + FFT
-
-	            ExtractFeatures();
-
-	            StandardizeFeatures();
-
-	            //UART PRINTING
-
-
-	            	            //char uart_msg[2048];
-
-	            	            int len = 0;
-
-	            	            const char *names[20] =
-	            	            {
-	            	                "peak_A",
-	            	                "std_A",
-	            	                "kurt_A",
-
-	            	                "peak_mic",
-	            	                "std_mic",
-	            	                "kurt_mic",
-
-	            	                "acc_fft_9",
-	            	                "acc_fft_10",
-	            	                "acc_fft_11",
-	            	                "acc_fft_80",
-	            	                "acc_fft_81",
-	            	                "acc_fft_82",
-
-	            	                "mic_fft_9",
-	            	                "mic_fft_10",
-	            	                "mic_fft_11",
-	            	                "mic_band_45_59",
-
-	            	                "centroid_A",
-	            	                "centroid_mic",
-
-	            	                "entropy_A",
-	            	                "entropy_mic"
-	            	            };
-
-	            	            len += snprintf(&uart_msg[len],
-	            	                            sizeof(uart_msg) - len,
-	            	                            "\r\n============================\r\n");
-
-	            	            len += snprintf(&uart_msg[len],
-	            	                            sizeof(uart_msg) - len,
-	            	                            "FEATURE VECTOR\r\n");
-
-	            	            len += snprintf(&uart_msg[len],
-	            	                            sizeof(uart_msg) - len,
-	            	                            "============================\r\n");
-
-	            	            for(int i = 0; i < FEATURE_COUNT; i++)
-	            	            {
-	            	                len += snprintf(&uart_msg[len],
-	            	                                sizeof(uart_msg) - len,
-	            	                                "%s = %.3f\r\n",
-	            	                                names[i],
-	            	                                feature_vector[i]);
-	            	            }
-
-	            	            len += snprintf(&uart_msg[len],
-	            	                            sizeof(uart_msg) - len,
-	            	                            "============================\r\n\r\n");
-
-	            	            HAL_UART_Transmit(&huart1,
-	            	                             (uint8_t*)uart_msg,
-	            	                             len,
-	            	                             1000);
-	        }
-	    }
-  /* USER CODE END StartFeatureTask */
+        if(sensorAlive && uartAlive)
+        {
+            sensorAlive = 0;
+            uartAlive = 0;
+            HAL_IWDG_Refresh(&hiwdg);
+        }
+        // If either flag not set, dog doesn't get fed → resets after 2s
+    }
+  /* USER CODE END StartWatchdogTask */
 }
 
 /**
@@ -1412,4 +763,3 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
-

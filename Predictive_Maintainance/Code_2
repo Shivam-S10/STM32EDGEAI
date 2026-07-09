@@ -19,7 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
-
+#include "NanoEdgeAI.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
@@ -50,36 +50,42 @@ DMA_HandleTypeDef hdma_adc1;
 
 I2C_HandleTypeDef hi2c1;
 DMA_HandleTypeDef hdma_i2c1_rx;
+
 IWDG_HandleTypeDef hiwdg;
 
 UART_HandleTypeDef huart1;
-DMA_HandleTypeDef hdma_usart1_tx;
 DMA_HandleTypeDef hdma_usart1_rx;
+
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for UARTTask */
 osThreadId_t UARTTaskHandle;
 const osThreadAttr_t UARTTask_attributes = {
   .name = "UARTTask",
-  .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for WatchdogTask */
-osThreadId_t WatchdogTaskHandle;
-const osThreadAttr_t WatchdogTask_attributes = {
-  .name = "WatchdogTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityRealtime,
+/* Definitions for AITask */
+osThreadId_t AITaskHandle;
+const osThreadAttr_t AITask_attributes = {
+  .name = "AITask",
+  .stack_size = 4096 * 4,
+  .priority = (osPriority_t) osPriorityNormal1,
 };
 /* Definitions for SensorQueue */
 osMessageQueueId_t SensorQueueHandle;
 const osMessageQueueAttr_t SensorQueue_attributes = {
   .name = "SensorQueue"
+};
+/* Definitions for FeatureQueue */
+osMessageQueueId_t FeatureQueueHandle;
+const osMessageQueueAttr_t FeatureQueue_attributes = {
+  .name = "FeatureQueue"
 };
 /* USER CODE BEGIN PV */
 #define MPU6050_ADDR (0x68 << 1)
@@ -87,6 +93,7 @@ volatile uint32_t adc_buffer[1];
 #define ADC_DONE_FLAG   (1U << 0)
 #define UART_DONE_FLAG  (1U << 1)
 #define I2C_DONE_FLAG (1U<<2)
+#define ANOMALY_THRESHOLD 90
 volatile uint16_t adcValue = 0;
 uint32_t droppedSamples = 0;
 
@@ -104,8 +111,8 @@ static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_IWDG_Init(void);
 void StartDefaultTask(void *argument);
-void StartTask02(void *argument);
-void StartWatchdogTask(void *argument);
+void StartUARTTask(void *argument);
+void StartAITask(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -152,8 +159,6 @@ int main(void)
   MX_I2C1_Init();
   MX_USART1_UART_Init();
   MX_IWDG_Init();
-
-
   /* USER CODE BEGIN 2 */
   uint8_t data = 0x00;
   HAL_I2C_Mem_Write(&hi2c1, (0x68 << 1), 0x6B, 1, &data, 1, 100);
@@ -176,7 +181,6 @@ int main(void)
   HAL_NVIC_DisableIRQ(DMA1_Channel1_IRQn);
   /* USER CODE END 2 */
 
-
   /* Init scheduler */
   osKernelInitialize();
 
@@ -196,6 +200,9 @@ int main(void)
   /* creation of SensorQueue */
   SensorQueueHandle = osMessageQueueNew (50, sizeof(SensorData_t), &SensorQueue_attributes);
 
+  /* creation of FeatureQueue */
+  FeatureQueueHandle = osMessageQueueNew (2, sizeof(uint16_t), &FeatureQueue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -205,10 +212,10 @@ int main(void)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* creation of UARTTask */
-  UARTTaskHandle = osThreadNew(StartTask02, NULL, &UARTTask_attributes);
+  UARTTaskHandle = osThreadNew(StartUARTTask, NULL, &UARTTask_attributes);
 
-  /* creation of WatchdogTask */
-  WatchdogTaskHandle = osThreadNew(StartWatchdogTask, NULL, &WatchdogTask_attributes);
+  /* creation of AITask */
+  AITaskHandle = osThreadNew(StartAITask, NULL, &AITask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -485,6 +492,9 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel2_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
+  /* DMA1_Channel3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
 
 }
 
@@ -495,13 +505,35 @@ static void MX_DMA_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PE3 */
+  GPIO_InitStruct.Pin = GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB14 */
+  GPIO_InitStruct.Pin = GPIO_PIN_14;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -636,79 +668,131 @@ void StartDefaultTask(void *argument)
   /* USER CODE END 5 */
 }
 
-/* USER CODE BEGIN Header_StartTask02 */
+/* USER CODE BEGIN Header_StartUARTTask */
 /**
-* @brief Function implementing the AI_TASK thread.
+* @brief Function implementing the UARTTask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartTask02 */
-void StartTask02(void *argument)
+/* USER CODE END Header_StartUARTTask */
+void StartUARTTask(void *argument)
 {
-  /* USER CODE BEGIN StartTask02 */
-		SensorData_t received;
-		static char csv_msg[128];
-		int len;
+  /* USER CODE BEGIN StartUARTTask */
+  /* Infinite loop */
+	uint16_t msg_val;
+	    static char uart_buf[128];
+	    int len;
 
-		osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
+	    // Set the flag initially so the first transmission works
+	    osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
 
-		for(;;)
-		{
-			// 200ms timeout — ensures uartAlive gets set even when queue is empty
-			if(osMessageQueueGet(SensorQueueHandle, &received, NULL, 200) == osOK)
-			{
-				osStatus_t status = osThreadFlagsWait(UART_DONE_FLAG, osFlagsWaitAny, 5);
+	    for(;;)
+	    {
+	        // Block until the AI task sends a similarity score or training status
+	        if(osMessageQueueGet(FeatureQueueHandle, &msg_val, NULL, osWaitForever) == osOK)
+	        {
+	            // Format the string based on the message type
+	            if (msg_val > 1000) {
+	                uint16_t current_iter = msg_val - 1000;
+	                len = snprintf(uart_buf, sizeof(uart_buf), "Training Model... (Phase %d)\r\n", current_iter);
+	            }
+	            else {
+	                len = snprintf(uart_buf, sizeof(uart_buf), "Similarity: %d%% | Status: %s\r\n",
+	                               msg_val, (msg_val < ANOMALY_THRESHOLD) ? "ANOMALY" : "NORMAL");
+	            }
 
-				if (status == osErrorTimeout) {
-					huart1.gState = HAL_UART_STATE_READY;
-					osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
-					uartAlive = 1;
-					continue;
-				}
+	            // Wait for the previous UART DMA transfer to finish
+	            osStatus_t status = osThreadFlagsWait(UART_DONE_FLAG, osFlagsWaitAny, osWaitForever);
 
-				len = snprintf(csv_msg, sizeof(csv_msg), "%d,%d,%d,%u\r\n",
-							   received.ax, received.ay, received.az, received.mic);
+	            if (status == osFlagsErrorTimeout) {
+	                huart1.gState = HAL_UART_STATE_READY;
+	                osThreadFlagsSet(UARTTaskHandle, UART_DONE_FLAG);
+	            }
 
-				if (len > 0) {
-					HAL_UART_Transmit_DMA(&huart1, (uint8_t*)csv_msg, len);
-				}
-			}
-
-			// Reached whether data came or 200ms timed out
-			uartAlive = 1;
-		}
-  /* USER CODE END StartTask02 */
+	            // Transmit the new string
+	            if (len > 0) {
+	                HAL_UART_Transmit_DMA(&huart1, (uint8_t*)uart_buf, len);
+	            }
+	        }
+	    }
+  /* USER CODE END StartUARTTask */
 }
 
-/* USER CODE BEGIN Header_StartWatchdogTask */
+/* USER CODE BEGIN Header_StartAITask */
 /**
-* @brief Function implementing the WatchdogTask thread.
+* @brief Function implementing the AITask thread.
 * @param argument: Not used
 * @retval None
 */
-/* USER CODE END Header_StartWatchdogTask */
-void StartWatchdogTask(void *argument)
+/* USER CODE END Header_StartAITask */
+void StartAITask(void *argument)
 {
-  /* USER CODE BEGIN StartWatchdogTask */
-    // Kick immediately so RTOS startup has full 2s
-    HAL_IWDG_Refresh(&hiwdg);
+  /* USER CODE BEGIN StartAITask */
+  /* Infinite loop */
+	SensorData_t received;
 
-    // Wait for both tasks to finish their startup routines
-    osDelay(1500);
+	    // Calculate the required buffer size dynamically using the macros from NanoEdgeAI.h
+	    const uint32_t BUFFER_SIZE = NEAI_INPUT_AXIS_NUMBER * NEAI_INPUT_SIGNAL_LENGTH;
+	    float neai_buffer[BUFFER_SIZE];
+	    uint32_t buffer_index = 0;
 
-    for(;;)
-    {
-        osDelay(500);
+	    uint8_t similarity = 0;
+	    uint16_t learning_iters = 0;
+	    uint16_t msg_to_uart = 0;
 
-        if(sensorAlive && uartAlive)
-        {
-            sensorAlive = 0;
-            uartAlive = 0;
-            HAL_IWDG_Refresh(&hiwdg);
-        }
-        // If either flag not set, dog doesn't get fed → resets after 2s
-    }
-  /* USER CODE END StartWatchdogTask */
+	    // How many inferences the model should learn from before switching to detection
+	    const uint16_t REQUIRED_LEARNING_ITERS = 50;
+
+	    // Initialize NanoEdge AI (passing 'true' usually resets any previous knowledge)
+	    neai_anomalydetection_init(true);
+
+	    for(;;)
+	    {
+	        // Block until data arrives from the 1kHz sensor task
+	        if(osMessageQueueGet(SensorQueueHandle, &received, NULL, osWaitForever) == osOK)
+	        {
+	            // 1. Pack data into the AI buffer (must match Studio column order)
+	            if (buffer_index < BUFFER_SIZE) {
+	                neai_buffer[buffer_index++] = (float)received.ax;
+	                neai_buffer[buffer_index++] = (float)received.ay;
+	                neai_buffer[buffer_index++] = (float)received.az;
+	                neai_buffer[buffer_index++] = (float)received.mic;
+	            }
+
+	            // 2. Buffer full -> Run Machine Learning
+	            if (buffer_index >= BUFFER_SIZE) {
+	                buffer_index = 0; // Reset index for the next batch
+
+	                if (learning_iters < REQUIRED_LEARNING_ITERS) {
+	                    // --- TRAINING PHASE ---
+	                    neai_anomalydetection_learn(neai_buffer);
+	                    learning_iters++;
+
+	                    // Add 1000 so the UART task knows this is a training status, not a score
+	                    msg_to_uart = 1000 + learning_iters;
+	                }
+	                else {
+	                    // --- INFERENCE PHASE ---
+	                    neai_anomalydetection_detect(neai_buffer, &similarity);
+
+	                    // Hardware LED Logic
+	                    if (similarity < ANOMALY_THRESHOLD) {
+	                        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);   // RED ON
+	                        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);  // GREEN OFF
+	                    } else {
+	                        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET); // RED OFF
+	                        HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_SET);    // GREEN ON
+	                    }
+
+	                    msg_to_uart = (uint16_t)similarity;
+	                }
+
+	                // 3. Send the result to the UART Task for printing
+	                osMessageQueuePut(FeatureQueueHandle, &msg_to_uart, 0, 0);
+	            }
+	        }
+	    }
+  /* USER CODE END StartAITask */
 }
 
 /**
